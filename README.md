@@ -29,14 +29,14 @@ flowchart LR
     end
 
     %% ===== Connections =====
-    Unity -->|Voice Stream<br/>(WebSocket)| STT
-    STT -->|TTS Audio / STT Text<br/>(WebSocket)| Unity
+    Unity -->|"Voice Stream\n(WebSocket)"| STT
+    STT -->|"TTS Audio / STT Text\n(WebSocket)"| Unity
 
-    STT -->|User Text<br/>(Async HTTP)| TTS
-    TTS -->|Audio Stream<br/>(Async HTTP)| STT
+    STT -->|"User Text\n(Async HTTP)"| TTS
+    TTS -->|"Audio Stream\n(Async HTTP)"| STT
 
-    TTS -->|LLM Prompt<br/>(HTTP)| LLM
-    LLM -->|Generated Text<br/>(Stream)| TTS
+    TTS -->|"LLM Prompt\n(HTTP)"| LLM
+    LLM -->|"Generated Text\n(Stream)"| TTS
 
     %% ===== Styles =====
     style Unity fill:#DDEEFF,stroke:#336699,color:#000
@@ -44,7 +44,6 @@ flowchart LR
     style TTS fill:#FFE4CC,stroke:#CC8844,color:#000
     style LLM fill:#E8FFD8,stroke:#669944,color:#000
 ```
-
 * 마이크 입력 (Unity → Node A): 16kHz, Mono, 16-bit Int PCM (WAV Header on start)
 * 음성 출력 (Node B → Unity): 48kHz, Mono, 32-bit Float PCM
 
