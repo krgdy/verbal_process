@@ -1,0 +1,10 @@
+faster-whisper==1.2.1
+ctranslate2==4.6.3
+fastapi
+python-multipart
+uvicorn[standard]
+onnxruntime
+numpy
+openai
+dotenv
+httpx

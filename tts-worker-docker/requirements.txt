@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+groq
+numpy
+openai
+python-dotenv
+aiohttp
+python-multipart
+transformers==4.46.1
+tokenizers==0.20.1
