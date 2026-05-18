@@ -9,51 +9,40 @@ Node A(stt-worker): 유니티와 웹 소켓으로 연결되어 오디오 입력�
 Node B가 반환한 오디오는 그대로 유니티로 패스스루
 Node B(tts-worker): Node A가 전사한 텍스트를 POST로 받아 LLM api로 전송,
 api의 텍스트 응답을 TTS 모델을 이용해 오디오로 변환하여 스트리밍 방식으로 Node A로 전송한다.
-```dot
-digraph G {
-    rankdir=LR
+```mermaid
+flowchart LR
 
-    // 그래프 전체 폰트 및 노드 기본 스타일 설정
-    node [shape=box, style="rounded,filled", fontname="Helvetica"]
-    edge [fontname="Helvetica", fontsize=10, color="#555555"]
+    %% ===== Client =====
+    subgraph CLIENT["Client Environment"]
+        Unity["Unity"]
+    end
 
-    // 1. 클라이언트 영역
-    subgraph cluster_client {
-        label="Client Environment"
-        style=dashed
-        color=gray
-        Unity [shape=component, fillcolor="#DDEEFF"]
-    }
+    %% ===== Backend =====
+    subgraph BACKEND["Backend Infrastructure"]
+        STT["Node A(STT)"]
+        TTS["Node B(TTS)"]
+    end
 
-    // 2. 서버/백엔드 영역
-    subgraph cluster_server {
-        label="Backend Infrastructure"
-        style=dashed
-        color=gray
-        
-        "Node A(STT)" [fillcolor="#FFE4CC"]
-        "Node B(TTS)" [fillcolor="#FFE4CC"]
-    }
+    %% ===== External =====
+    subgraph EXTERNAL["External Service"]
+        LLM["LLM API"]
+    end
 
-    // 3. 외부 API 영역
-    subgraph cluster_external {
-        label="External Service"
-        style=dashed
-        color=gray
-        
-        "LLM API" [shape=cloud, fillcolor="#E8FFD8"]
-    }
+    %% ===== Connections =====
+    Unity -->|Voice Stream<br/>(WebSocket)| STT
+    STT -->|TTS Audio / STT Text<br/>(WebSocket)| Unity
 
-    // 데이터 흐름 및 프로토콜 정의
-    Unity -> "Node A(STT)" [label=" Voice Stream\n(WebSocket)", color="#0055FF", penwidth=1.5]
-    "Node A(STT)" -> Unity [label=" TTS Audio / STT Text\n(WebSocket)", color="#0055FF"]
+    STT -->|User Text<br/>(Async HTTP)| TTS
+    TTS -->|Audio Stream<br/>(Async HTTP)| STT
 
-    "Node A(STT)" -> "Node B(TTS)" [label=" User Text\n(Async HTTP)"]
-    "Node B(TTS)" -> "Node A(STT)" [label=" Audio Stream\n(Async HTTP)"]
+    TTS -->|LLM Prompt<br/>(HTTP)| LLM
+    LLM -->|Generated Text<br/>(Stream)| TTS
 
-    "Node B(TTS)" -> "LLM API" [label=" LLM Prompt\n(HTTP)"]
-    "LLM API" -> "Node B(TTS)" [label=" Generated Text\n(Stream)"]
-}
+    %% ===== Styles =====
+    style Unity fill:#DDEEFF,stroke:#336699,color:#000
+    style STT fill:#FFE4CC,stroke:#CC8844,color:#000
+    style TTS fill:#FFE4CC,stroke:#CC8844,color:#000
+    style LLM fill:#E8FFD8,stroke:#669944,color:#000
 ```
 
 * 마이크 입력 (Unity → Node A): 16kHz, Mono, 16-bit Int PCM (WAV Header on start)
