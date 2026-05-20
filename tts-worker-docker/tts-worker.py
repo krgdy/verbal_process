@@ -80,7 +80,7 @@ print("[Init] Compile setup complete.")
 
 speaker_wav_path = os.path.join(base_dir, "speaker.wav")
 prompt_tokens = None
-prompt_texts = ["왜 우리 회사에 지원했나요? 예상치 못한 문제에 봉착했을 때, 해결했던 경험은? 동료와 갈등이 발생했을 때, 어떻게 해결했나요? 입사 후 1년 내에 달성하고 싶은 목표는? 마지막으로 하고 싶은 말이나 질문 있나요?"] 
+prompt_texts = os.environ.get("REFERENCE_DIALOGUE", "왜 우리 회사에 지원했나요? 예상치 못한 문제에 봉착했을 때, 해결했던 경험은? 동료와 갈등이 발생했을 때, 어떻게 해결했나요? 입사 후 1년 내에 달성하고 싶은 목표는? 마지막으로 하고 싶은 말이나 질문 있나요?")
 
 if os.path.exists(speaker_wav_path):
     print(f"[Init] Pre-computing prompt tokens...")

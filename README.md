@@ -97,6 +97,7 @@ TTS_WORKER_URL = http://host.docker.internal:8001/process(노드 B의 주소)
 2. tts-worker-docker 폴더내의 .env
 GROQ_API_KEY = groq api 키
 MODEL_NAME = 사용할 모델 (예: openai/gpt-oss-20b)
+REFERENCE_DIALOGUE = 레퍼런스 음성 파일의 대사
 SYSTEM_PROMPT = 시스템 프롬프트로 넣고 싶은 텍스트
 #### 4.3 실행
 1. 먼저 프로젝트 루트 폴더(verbal_process)를 VS Code로 오픈
@@ -108,3 +109,4 @@ SYSTEM_PROMPT = 시스템 프롬프트로 넣고 싶은 텍스트
 FishSpeech v1.5(TTS)은 제공된 레퍼런스 보이스 파일에 맞는 목소리로 음성을 합성한다.
 그러므로 tts-worker-docker 내부의 speaker.wav 파일을 변경하여 합성되는 음성을 변경할 수 있다.
 추천 포맷은 10~30초 분량의 다른 소리 없이 한 사람의 음성만 담긴 Mono 44.1kHz WAV파일이다.
+**참고로 파일 변경 시 tts-worker-docker 폴더내의 .env 파일의 REFERENCE_DIALOGUE에 대사를 수정해야 한다.**
