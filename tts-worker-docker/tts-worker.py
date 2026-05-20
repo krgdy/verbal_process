@@ -42,7 +42,7 @@ fs_model_path = os.path.join(base_dir, "model", "fish-speech-1.5")
 
 # VQGAN 로드 및 정밀도 캐스팅
 print("[Init] Loading VQGAN...")
-vqgan_model = load_vqgan(
+vqgan_model = load_vqgan(   
     config_name="firefly_gan_vq",
     checkpoint_path=f"{fs_model_path}/firefly-gan-vq-fsq-8x1024-21hz-generator.pth",
     device=device,
@@ -129,15 +129,15 @@ def synthesize_audio(text: str):
                     decode_one_token=compiled_decode # 변경된 부분
                 )
 
-                acoustic_tokens = None
+                all_codes = [] # 모든 토큰 청크를 담을 리스트
                 for response in token_generator:
                     if response.action == "sample":
-                        acoustic_tokens = response.codes
-                        break 
+                        all_codes.append(response.codes) # generate_long에서 yield된 토큰 청크를 리스트에 담음
 
-                if acoustic_tokens is None or acoustic_tokens.shape[-1] == 0:
+                if not all_codes:
                     return b""
 
+                acoustic_tokens = torch.cat(all_codes, dim=-1) # 모든 청크를 하나로 합침
                 acoustic_tokens = acoustic_tokens.unsqueeze(0).to(device)
                 feature_lengths = torch.tensor([acoustic_tokens.shape[-1]], device=device)
 
