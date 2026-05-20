@@ -8,7 +8,7 @@ namespace VerbalProcess
     public class Speaker : MonoBehaviour
     {
         [Header("Audio Settings")]
-        [SerializeField] private int serverSampleRate = 48000;
+        [SerializeField] private int serverSampleRate = 44100;
         [SerializeField] private float volume = 1.0f;
         [SerializeField] private int bufferThresholdChunks = 3; // 큐에 쌓일 청크 개수 기준
 
