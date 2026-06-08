@@ -72,9 +72,8 @@ torch._inductor.config.triton.unique_kernel_names = True
 
 compiled_decode = torch.compile(
     decode_one_token_ar,
-    fullgraph=True,
     backend="inductor",
-    mode="max-autotune" # 속도 극대화 모드
+    mode="default" # 속도 극대화 모드
 )
 print("[Init] Compile setup complete.")
 
@@ -111,8 +110,7 @@ client = OpenAI(api_key=os.environ.get("GROQ_API_KEY"), base_url="https://api.gr
 class TTSRequest(BaseModel):
     text: str
 
-# synthesize_audio 함수가 이전 문장 정보를 받도록 수정
-def synthesize_audio(text: str, current_prompt_text: str, current_prompt_tokens: torch.Tensor):
+def synthesize_audio(text: str):
     with tts_lock:
         print(f"[TTS] Synthesizing: {text}")
         try:
@@ -123,8 +121,8 @@ def synthesize_audio(text: str, current_prompt_text: str, current_prompt_tokens:
                     model=llama_model,
                     device=device,
                     text=text,
-                    prompt_text=current_prompt_text,
-                    prompt_tokens=current_prompt_tokens,
+                    prompt_text=prompt_texts if prompt_tokens is not None else None,
+                    prompt_tokens=prompt_tokens,
                     max_new_tokens=1024,
                     temperature=0.6, # temperature 감소
                     top_p=0.9,
@@ -134,32 +132,28 @@ def synthesize_audio(text: str, current_prompt_text: str, current_prompt_tokens:
                 all_codes = [] # 모든 토큰 청크를 담을 리스트
                 for response in token_generator:
                     if response.action == "sample":
-                        all_codes.append(response.codes) # generate_long에서 yield된 토큰 청크를 리스트에 담음
+                        all_codes.append(response.codes.detach().clone()) # generate_long에서 yield된 토큰 청크를 리스트에 담음
 
                 if not all_codes:
-                    return b"", None, None
+                    return b""
 
-                acoustic_tokens_2d = torch.cat(all_codes, dim=1) # 모든 청크를 하나로 합침
-                acoustic_tokens_3d = acoustic_tokens_2d.unsqueeze(0).to(device)
-                feature_lengths = torch.tensor([acoustic_tokens_3d.shape[-1]], device=device)
+                acoustic_tokens = torch.cat(all_codes, dim=-1) # 모든 청크를 하나로 합침
+                acoustic_tokens = acoustic_tokens.unsqueeze(0).to(device)
+                feature_lengths = torch.tensor([acoustic_tokens.shape[-1]], device=device)
 
                 audio_tensor, _ = vqgan_model.decode(
-                    indices=acoustic_tokens_3d, 
+                    indices=acoustic_tokens, 
                     feature_lengths=feature_lengths
                 )
 
                 audio_np = audio_tensor.squeeze().cpu().float().numpy()
-                # 반환할 때 방금 생성한 토큰도 같이 반환!
-                return audio_np.astype(np.float32).tobytes(), text, acoustic_tokens_2d
+                return audio_np.astype(np.float32).tobytes()
 
         except Exception as e:
             print(f"[Error] Synthesis failed: {e}")
-            return b"", None, None
+            return b""
 
 async def response_generator(user_text: str):
-    # 1. 초기 프롬프트는 전역으로 로드해둔 speaker.wav 사용
-    session_prompt_text = prompt_texts[0] if prompt_tokens is not None else None
-    session_prompt_tokens = prompt_tokens
     try:
         response = client.chat.completions.create(
             model=os.environ.get("MODEL_NAME"),
@@ -176,26 +170,19 @@ async def response_generator(user_text: str):
             content = chunk.choices[0].delta.content
             if content:
                 sentence_buffer += content
-                splits = re.split(r'(?<=[.?!])\s+', sentence_buffer)
-                if len(splits) > 1:
-                    complete_text = " ".join(splits[:-1]).strip()
-                    if len(complete_text) >= 15:
-                        # 2. 현재 상태의 프롬프트를 넘겨줌
-                        audio_chunk, prev_text, prev_tokens = await asyncio.to_thread(
-                            synthesize_audio, complete_text, session_prompt_text, session_prompt_tokens
-                        )
-                        if audio_chunk:
-                            yield audio_chunk
-                            # 3. 다음 문장을 위해 프롬프트 업데이트 (문맥 이어가기
-                            if prev_tokens is not None:
-                                session_prompt_text = prev_text
-                                session_prompt_tokens = prev_tokens
-                        sentence_buffer = splits[-1]
+                if any(ch in content for ch in ".!?\n"):
+                    sentences = [ s for s in re.split(r'(?<=[.!?\n])',sentence_buffer) if s ]
+                    for i in range(len(sentences) - 1):
+                        sentence = sentences[i].strip()
+                        if sentence:
+                            # 길이가 너무 짧은 문장 필터링 또는 결합 로직을 추가하면 RTF를 더 개선할 수 있습니다.
+                            audio_chunk = await asyncio.to_thread(synthesize_audio, sentence)
+                            if audio_chunk:
+                                yield audio_chunk
+                    sentence_buffer = sentences[-1]
 
         if sentence_buffer.strip():
-            audio_chunk, _, _ = await asyncio.to_thread(
-                synthesize_audio, sentence_buffer.strip(), session_prompt_text, session_prompt_tokens
-            )
+            audio_chunk = await asyncio.to_thread(synthesize_audio, sentence_buffer.strip())
             if audio_chunk:
                 yield audio_chunk
 
@@ -218,11 +205,9 @@ async def startup_event():
     dummy_text = "안녕하세요. 시스템 초기화를 위한 더미 테스트입니다."
 
     try:
-        initial_prompt_text = prompt_texts[0] if prompt_tokens is not None else None
-        initial_prompt_tokens = prompt_tokens
         # synthesize_audio 함수 강제로 한 번 실행
         # 비동기 환경이므로 asyncio.to_thread 사용
-        await asyncio.to_thread(synthesize_audio, dummy_text, initial_prompt_text, initial_prompt_tokens)
+        await asyncio.to_thread(synthesize_audio, dummy_text)
         print("="*60)
         print("[Warm-up] Compilation and warm-up successful!")
         print("[Warm-up] Server is now ready to accept requests.")
