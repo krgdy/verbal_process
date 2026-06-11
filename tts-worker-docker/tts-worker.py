@@ -3,11 +3,12 @@ import re
 import json
 import asyncio
 import torch
-import torchaudio
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, HTTPException
+import librosa
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -21,16 +22,14 @@ from fish_speech.models.vqgan.inference import load_model as load_vqgan
 # 환경 변수 로드
 load_dotenv()
 
-app = FastAPI()
 tts_lock = Lock()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# 최적화 1: TF32 활성화 및 정밀도(bfloat16) 설정
+# 정밀도 설정
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    # 모델에 맞는 정밀도 설정 (GPU가 bfloat16을 지원하지 않으면 torch.float16 사용)
     precision = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 else:
     precision = torch.float32
@@ -40,7 +39,7 @@ print(f"[Init] Loading Fish Speech 1.5 models on {device} with {precision}...")
 base_dir = os.path.dirname(os.path.abspath(__file__))
 fs_model_path = os.path.join(base_dir, "model", "fish-speech-1.5")
 
-# VQGAN 로드 및 정밀도 캐스팅
+# VQGAN 로드
 print("[Init] Loading VQGAN...")
 vqgan_model = load_vqgan(   
     config_name="firefly_gan_vq",
@@ -49,7 +48,7 @@ vqgan_model = load_vqgan(
 )
 vqgan_model.eval()
 
-# LLaMA 로드 및 정밀도 캐스팅
+# LLaMA 로드
 print("[Init] Loading LLaMA Text2Semantic model...")
 llama_model = DualARTransformer.from_pretrained(fs_model_path, load_weights=True)
 llama_model.to(device=device, dtype=precision)
@@ -64,8 +63,8 @@ with torch.device(device):
         dtype=precision,
     )
 
-# 최적화 2: decode_one_token_ar 컴파일 (Inductor 최적화)
-print("[Init] Compiling decode function for extreme speed (May take a few minutes on first run)...")
+# 컴파일 최적화
+print("[Init] Compiling decode function for extreme speed...")
 import torch._inductor.config
 torch._inductor.config.coordinate_descent_tuning = True
 torch._inductor.config.triton.unique_kernel_names = True
@@ -73,28 +72,28 @@ torch._inductor.config.triton.unique_kernel_names = True
 compiled_decode = torch.compile(
     decode_one_token_ar,
     backend="inductor",
-    mode="default" # 속도 극대화 모드
+    mode="default"
 )
-print("[Init] Compile setup complete.")
 
 speaker_wav_path = os.path.join(base_dir, "speaker.wav")
 prompt_tokens = None
 prompt_texts = os.environ.get("REFERENCE_DIALOGUE", "왜 우리 회사에 지원했나요? 예상치 못한 문제에 봉착했을 때, 해결했던 경험은? 동료와 갈등이 발생했을 때, 어떻게 해결했나요? 입사 후 1년 내에 달성하고 싶은 목표는? 마지막으로 하고 싶은 말이나 질문 있나요?")
 
+# 안정적인 librosa 기반 로딩
 if os.path.exists(speaker_wav_path):
-    print(f"[Init] Pre-computing prompt tokens...")
-    audio, sr = torchaudio.load(speaker_wav_path)
-    if sr != vqgan_model.spec_transform.sample_rate:
-        audio = torchaudio.functional.resample(audio, sr, vqgan_model.spec_transform.sample_rate)
+    print(f"[Init] Pre-computing prompt tokens with librosa...")
+    audio_data, sr = librosa.load(speaker_wav_path, sr=vqgan_model.spec_transform.sample_rate)
+    audio = torch.from_numpy(audio_data).float()
+    
+    if audio.dim() == 1:
+        audio = audio.unsqueeze(0).unsqueeze(0)
+    elif audio.dim() == 2:
+        audio = audio.unsqueeze(0)
 
-    if audio.dim() == 2:
-        audio = audio.unsqueeze(0) 
-
-    # 오디오 데이터도 모델과 동일한 정밀도로 맞춤
     audio = audio.to(device=device)
     audio_lengths = torch.tensor([audio.shape[-1]], device=device)
 
-    with torch.inference_mode(): # no_grad 대신 inference_mode 사용
+    with torch.inference_mode():
         indices, _ = vqgan_model.encode(audio, audio_lengths)
         prompt_tokens = indices[0]
 else:
@@ -112,11 +111,9 @@ class TTSRequest(BaseModel):
 
 def synthesize_audio(text: str):
     with tts_lock:
-        print(f"[TTS] Synthesizing: {text}")
         try:
-            # 🔥 최적화 3: torch.inference_mode() 적용
+            print(f"[TTS] Synthesizing: {text}")
             with torch.inference_mode():
-                # 컴파일된 디코더 함수(compiled_decode) 사용
                 token_generator = generate_long(
                     model=llama_model,
                     device=device,
@@ -124,73 +121,56 @@ def synthesize_audio(text: str):
                     prompt_text=prompt_texts if prompt_tokens is not None else None,
                     prompt_tokens=prompt_tokens,
                     max_new_tokens=1024,
-                    temperature=0.6, # temperature 감소
+                    temperature=0.6,
                     top_p=0.9,
-                    decode_one_token=compiled_decode # 변경된 부분
+                    decode_one_token=compiled_decode
                 )
 
-                all_codes = [] # 모든 토큰 청크를 담을 리스트
+                all_codes = []
                 for response in token_generator:
                     if response.action == "sample":
-                        all_codes.append(response.codes.detach().clone()) # generate_long에서 yield된 토큰 청크를 리스트에 담음
+                        all_codes.append(response.codes.detach().clone())
 
-                if not all_codes:
-                    return b""
+                if not all_codes: return b""
 
-                acoustic_tokens = torch.cat(all_codes, dim=-1) # 모든 청크를 하나로 합침
-                acoustic_tokens = acoustic_tokens.unsqueeze(0).to(device)
+                acoustic_tokens = torch.cat(all_codes, dim=-1).unsqueeze(0).to(device)
                 feature_lengths = torch.tensor([acoustic_tokens.shape[-1]], device=device)
 
-                audio_tensor, _ = vqgan_model.decode(
-                    indices=acoustic_tokens, 
-                    feature_lengths=feature_lengths
-                )
-
-                audio_np = audio_tensor.squeeze().cpu().float().numpy()
-                return audio_np.astype(np.float32).tobytes()
-
+                audio_tensor, _ = vqgan_model.decode(indices=acoustic_tokens, feature_lengths=feature_lengths)
+                return audio_tensor.squeeze().cpu().float().numpy().astype(np.float32).tobytes()
         except Exception as e:
             print(f"[Error] Synthesis failed: {e}")
             return b""
 
 async def response_generator(user_text: str):
     try:
-        response = client.chat.completions.create(
+        with client.chat.completions.create(
             model=os.environ.get("MODEL_NAME"),
-            messages=[
-                {"role": "system", "content": os.environ.get("SYSTEM_PROMPT")},
-                {"role": "user", "content": user_text}
-            ],
+            messages=[{"role": "system", "content": os.environ.get("SYSTEM_PROMPT")}, {"role": "user", "content": user_text}],
             stream=True
-        )
-
-        sentence_buffer = ""
-        for chunk in response:
-            if not chunk.choices: continue
-            content = chunk.choices[0].delta.content
-            if content:
-                sentence_buffer += content
-                if any(ch in content for ch in ".!?\n"):
-                    sentences = [ s for s in re.split(r'(?<=[.!?\n])',sentence_buffer) if s ]
-                    for i in range(len(sentences) - 1):
-                        sentence = sentences[i].strip()
-                        if sentence:
-                            # 길이가 너무 짧은 문장 필터링 또는 결합 로직을 추가하면 RTF를 더 개선할 수 있습니다.
-                            audio_chunk = await asyncio.to_thread(synthesize_audio, sentence)
-                            if audio_chunk:
-                                yield audio_chunk
-                    sentence_buffer = sentences[-1]
-
-        if sentence_buffer.strip():
-            audio_chunk = await asyncio.to_thread(synthesize_audio, sentence_buffer.strip())
-            if audio_chunk:
-                yield audio_chunk
-
+        ) as response:
+            sentence_buffer = ""
+            for chunk in response:
+                if not chunk.choices: continue
+                content = chunk.choices[0].delta.content
+                if content:
+                    sentence_buffer += content
+                    if any(ch in content for ch in ".!?\n"):
+                        sentences = [ s for s in re.split(r'(?<=[.!?\n])',sentence_buffer) if s ]
+                        for i in range(len(sentences) - 1):
+                            sentence = sentences[i].strip()
+                            if sentence:
+                                audio_chunk = await asyncio.to_thread(synthesize_audio, sentence)
+                                if audio_chunk: yield audio_chunk
+                        sentence_buffer = sentences[-1]
+            if sentence_buffer.strip():
+                audio_chunk = await asyncio.to_thread(synthesize_audio, sentence_buffer.strip())
+                if audio_chunk: yield audio_chunk
     except Exception as e:
         print(f"[Error] response_generator failed: {e}")
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """
     서버 시작 시 자동으로 실행되는 웜업(Warm-up) 함수입니다.
     torch.compile의 JIT 컴파일 과정을 미리 수행하여 첫 사용자 요청의 지연을 없앱니다.
@@ -216,6 +196,12 @@ async def startup_event():
         print(f"[Warm-up Error] Warm-up failed: {e}")
         print("Please check the error logs.")
 
+    yield
+
+    print("tts 서버 종료")
+
+app = FastAPI(lifespan=lifespan)
+
 @app.post("/process")
 async def process_text_to_audio(request: TTSRequest):
     if not request.text:
@@ -224,6 +210,35 @@ async def process_text_to_audio(request: TTSRequest):
         response_generator(request.text),
         media_type="application/octet-stream" 
     )
+
+@app.websocket("/ws/tts")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("[WS] Persistent client connection accepted.")
+    try:
+        while True:
+            # 클라이언트로부터 JSON 텍스트 수신 (예: {"text": "..."})
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            text = message.get("text")
+            
+            if text:
+                # response_generator를 통해 생성되는 오디오 바이트 청크를 실시간 전송
+                async for audio_chunk in response_generator(text):
+                    await websocket.send_bytes(audio_chunk)
+                
+                # 합성 완료 신호 전송 (연결을 끊지 않고 스트림 종료만 통보)
+                await websocket.send_json({"type": "end"})
+    except WebSocketDisconnect:
+        print("[WS] Client disconnected")
+    except Exception as e:
+        print(f"[WS] Error: {e}")
+    finally:
+        try:
+            await websocket.close()
+            print("[WS] Connection closed.")
+        except:
+            pass
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)
